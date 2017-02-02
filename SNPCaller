@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#Compares alignment and vcf methods results for ts/tv ratio.
+#Compares alignment and VCF methods results for transition transversion ratio.
 
 PS3='Enter your choice: '
 options=("Bowtie2" "Bwa-mem")
@@ -26,7 +26,7 @@ if [ -r $ref ] && [ -r $read_1 ] && [ -r $read_2 ] ; then
 #Bowtie2 Alignment
 echo $ref $build | bowtie2-build $ref $build
 echo $build $read_1 $read_2 | bowtie2 -x $build -1 $read_1 $read_2 --threads 16 -S $build.sam > $build.aln.txt
-echo $build | samtools view -bS $build.sam > $build.bam
+echo $build | samtools view -bS $build.sam -@ 16 > $build.bam
 
 #GATK VCF:
 echo $ref | java -jar ../../../../opt/picard-tools-2.0.1/picard.jar CreateSequenceDictionary R= $ref O= $ref.dict
@@ -41,9 +41,14 @@ echo $build | bcftools stats $build.gatk.vcf > $build.gatkvcf.txt
 #Samtools VCF:
 echo $cmd $build | samtools $cmd $build.bam $build.sorted -@ 16
 echo $build | rm $build.bam
-echo $ref $build | samtools mpileup -uf $ref $build.sorted | bcftools call -c > $build.samtools.vcf
-echo $build | rm $build.sorted.bam
-echo $build | bcftools stats $build.samtools.vcf > $build.samtools.txt
+echo $build | samtools index $build.sorted
+echo $build | java -XX:ParallelGCThreads=16 -jar picard.jar MarkDuplicates INPUT=$build.sorted OUTPUT=$build.bam METRICS_FILE=metrics.txt REMOVE_DUPLICATES=true VALIDATION_STRINGENCY=LENIENT
+echo $build $ref | java -XX:ParallelGCThreads=16 -jar GenomeAnalysisTK.jar -T RealignerTargetCreator -R $ref -I $build.bam -o Intervals.txt
+echo $ref $build | java -XX:ParallelGCThreads=16 -jar GenomeAnalysisTK.jar -T IndelRealigner -R $ref -I $build.bam -targetIntervals Intervals.txt -o $NoDupRealigned.bam
+echo $ref $NoDupRealigned.bam | samtools mpileup -uf $ref $NoDupRealigned.bam | bcftools call -c > $build.samtools.vcf
+echo $build.samtools.vcf | vcftools --vcf $build.samtools.vcf --recode --recode-INFO-all --out $build --minQ 20.00 #The output adds '.recode.vcf' to the specified name
+echo $build | rm $NoDupRealigned.bam
+echo $build | bcftools stats $build.recode.vcf > $build.samtools.txt
 exit 0
 else 
 echo "Outputs missing and/or truncated, please verify inputs"
@@ -84,13 +89,19 @@ echo $build | bcftools stats $build.gatk.vcf > $build.gatkvcf.txt
 #Samtools VCF:
 echo $cmd $build | samtools $cmd $build.bam $build.sorted -@ 16
 echo $build | rm $build.bam
-echo $ref $build | samtools mpileup -uf $ref $build.sorted | bcftools call -c > $build.samtools.vcf
-echo $build | rm $build.sorted.bam
-echo $build | bcftools stats $build.samtools.vcf > $build.samtools.txt
+echo $build | samtools index $build.sorted
+echo $build | java -XX:ParallelGCThreads=16 -jar picard.jar MarkDuplicates INPUT=$build.sorted OUTPUT=$build.bam METRICS_FILE=metrics.txt REMOVE_DUPLICATES=true VALIDATION_STRINGENCY=LENIENT
+echo $build $ref | java -XX:ParallelGCThreads=16 -jar GenomeAnalysisTK.jar -T RealignerTargetCreator -R $ref -I $build.bam -o Intervals.txt
+echo $ref $build | java -XX:ParallelGCThreads=16 -jar GenomeAnalysisTK.jar -T IndelRealigner -R $ref -I $build.bam -targetIntervals Intervals.txt -o $NoDupRealigned.bam
+echo $ref $NoDupRealigned.bam | samtools mpileup -uf $ref $NoDupRealigned.bam | bcftools call -c > $build.samtools.vcf
+echo $build.samtools.vcf | vcftools --vcf $build.samtools.vcf --recode --recode-INFO-all --out $build --minQ 20.00 #The output adds '.recode.vcf' to the specified name
+echo $build | rm $NoDupRealigned.bam
+echo $build | bcftools stats $build.recode.vcf > $build.samtools.txt
 exit 0
 else 
 echo "Outputs missing and/or truncated, please verify inputs"
 exit 1
+
 
 ;;
 
