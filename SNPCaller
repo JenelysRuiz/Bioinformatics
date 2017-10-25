@@ -1,62 +1,88 @@
 #!/bin/bash
+#Module for comparing software and parameters for variant calling
+#Dependencies: Bowtie2, SAMtools, BBTools, gb2tab, standard unix, python-2.7+, perl
 
-#Compares alignment and VCF methods results for transition transversion ratio.
+#Path to most programs. Modify if needed.
+dirpath="../../../../opt"
 
-PS3='Enter your choice: '
-options=("Bowtie2" "Bwa-mem")
 
-select opt in "${options[@]}"
+alnoptions=("Bowtie2" "Bwa-mem")
+suboptions=("SingleRead" "ReadPair")
+  
+select alnopt in "${alnoptions[@]}"
 do
-    case $opt in
+    case $alnopt in
         "Bowtie2")
+select subopt in "${suboptions[@]}"
+do
+    case $subopt in
+
+	"SingleRead")
 echo "Select your reference (.fna) and read (.fastq) files; include path."
 echo "Note: You may choose from the following files in this directory and/or 
 subdirectories "
 ls -L | find . -name "*.fa" -o -name "*.faa" -o -name "*.fna" -o -name "*.ffn" -o -name "*.frn"
 read -p "Reference : " ref
 ls -L | find . -name "*.fastq"
-read -p "Read_1 : " read_1
-read -p "Read_2 : " read_2
+read -p "Read : " read
 clear
 echo "Select a name for your build, sortedbam, and vcf."
-read -p "BuildName :" build
+read -p "BuildName : " build
+read -r -p "Do you wish to run GATK as well? [y/N] : " response
 cmd="sort"
-if [ -r $ref ] && [ -r $read_1 ] && [ -r $read_2 ] ; then
+if [[ $response =~ ^([yY][eE][sS]|[yY])$ ]] && [ -r $ref ] && [ -r $read ] ; then
 
 #Bowtie2 Alignment
 echo $ref $build | bowtie2-build $ref $build
-echo $build $read_1 $read_2 | bowtie2 -x $build -1 $read_1 $read_2 --threads 16 -S $build.sam > $build.aln.txt
+echo $build $read | bowtie2 -x $build $read --threads 16 -S $build.sam > $build.aln.txt
 echo $build | samtools view -bS $build.sam -@ 16 > $build.bam
 
 #GATK VCF:
-echo $ref | java -jar ../../../../opt/picard-tools-2.0.1/picard.jar CreateSequenceDictionary R= $ref O= $ref.dict
-echo $build | java -jar ../../../../opt/picard-tools-2.0.1/picard.jar AddOrReplaceReadGroups  INPUT= $build.sam OUTPUT= $build.fixed.sam RGID=1  RGLB= library1  RGPL=illumina RGPU=1  RGSM=sample1 SORT_ORDER=coordinate CREATE_INDEX=TRUE VALIDATION_STRINGENCY=LENIENT
+echo $ref | java -Djava.io.tmpdir=../../tmp -XX:ParallelGCThreads=16 -jar $dirpath/picard-tools-2.0.1/picard.jar CreateSequenceDictionary R= $ref O= $ref.dict
+echo $build | java -Djava.io.tmpdir=../../tmp -XX:ParallelGCThreads=16 -jar $dirpath/picard-tools-2.0.1/picard.jar AddOrReplaceReadGroups  INPUT= $build.sam OUTPUT= $build.fixed.sam RGID=1  RGLB= library1  RGPL=illumina RGPU=1  RGSM=sample1 SORT_ORDER=coordinate CREATE_INDEX=TRUE VALIDATION_STRINGENCY=LENIENT
 echo $build | rm $build.sam
-echo $build | java -jar ../../../../opt/picard-tools-2.0.1/picard.jar SortSam I= $build.fixed.sam  O= $build.fixed.sorted.bam SORT_ORDER=coordinate CREATE_INDEX=TRUE VALIDATION_STRINGENCY=LENIENT
+echo $build | java -Djava.io.tmpdir=../../tmp -XX:ParallelGCThreads=16 -jar $dirpath/picard-tools-2.0.1/picard.jar SortSam I= $build.fixed.sam  O= $build.fixed.sorted.bam SORT_ORDER=coordinate CREATE_INDEX=TRUE VALIDATION_STRINGENCY=LENIENT
 echo $build | rm $build.fixed.sam
-echo $ref $build | java -jar ../../../../opt/GenomeAnalysisTK.jar -T HaplotypeCaller -R $ref -I $build.fixed.sorted.bam -stand_call_conf 30 -stand_emit_conf 10 -o $build.gatk.vcf
+echo $ref $build | java -Djava.io.tmpdir=../../tmp -jar $dirpath/GenomeAnalysisTK.jar -nct 16 -T HaplotypeCaller -R $ref -I $build.fixed.sorted.bam -stand_call_conf 30 -stand_emit_conf 10 -o $build.gatk.vcf
 echo $build | rm $build.fixed.sorted.bam
-echo $build | bcftools stats $build.gatk.vcf > $build.gatkvcf.txt
+#Filter
+echo $build | vcftools --vcf $build.gatk.vcf --recode --recode-INFO-all --out $build.gatk --minQ 20.00
+echo $build | bcftools stats $build.gatk.recode.vcf > $build.filteredbowtiegatkvcf.txt
+echo $build | rm $build.gatk.vcf
 
 #Samtools VCF:
 echo $cmd $build | samtools $cmd $build.bam $build.sorted -@ 16
 echo $build | rm $build.bam
-echo $build | samtools index $build.sorted
-echo $build | java -XX:ParallelGCThreads=16 -jar picard.jar MarkDuplicates INPUT=$build.sorted OUTPUT=$build.bam METRICS_FILE=metrics.txt REMOVE_DUPLICATES=true VALIDATION_STRINGENCY=LENIENT
-echo $build $ref | java -XX:ParallelGCThreads=16 -jar GenomeAnalysisTK.jar -T RealignerTargetCreator -R $ref -I $build.bam -o Intervals.txt
-echo $ref $build | java -XX:ParallelGCThreads=16 -jar GenomeAnalysisTK.jar -T IndelRealigner -R $ref -I $build.bam -targetIntervals Intervals.txt -o $NoDupRealigned.bam
-echo $ref $NoDupRealigned.bam | samtools mpileup -uf $ref $NoDupRealigned.bam | bcftools call -c > $build.samtools.vcf
-echo $build.samtools.vcf | vcftools --vcf $build.samtools.vcf --recode --recode-INFO-all --out $build --minQ 20.00 #The output adds '.recode.vcf' to the specified name
-echo $build | rm $NoDupRealigned.bam
-echo $build | bcftools stats $build.recode.vcf > $build.samtools.txt
+echo $ref $build | samtools mpileup -uf $ref $build.sorted.bam | bcftools call -c > $build.samtools.vcf
+echo $build | rm $build.sorted.bam
+#Filter
+echo $build | vcftools --vcf $build.samtools.vcf --recode --recode-INFO-all --out $build.samtools --minQ 20.00
+echo $build | bcftools stats $build.samtools.recode.vcf > $build.filteredbowtiesamtoolsvcf.txt
+echo $build | rm $build.samtools.vcf
 exit 0
+
+elif [[ $response =~ ^([nN][oO]|[nN])$ ]] && [ -r $ref ] && [ -r $read ] ; then
+echo $ref $build | bowtie2-build $ref $build
+echo $build $read | bowtie2 -x $build $read --threads 16 -S $build.sam > $build.aln.txt
+echo $build | samtools view -bS $build.sam > $build.bam
+echo $build | rm $build.sam
+echo $cmd $build | samtools $cmd $build.bam $build.sorted -@ 16
+echo $build | rm $build.bam
+echo $ref $build | samtools mpileup -uf $ref $build.sorted.bam | bcftools call -c > $build.samtools.vcf
+echo $build | rm $build.sorted.bam 
+echo $build | vcftools --vcf $build.samtools.vcf --recode --recode-INFO-all --out $build.samtools --minQ 20.00
+echo $build | bcftools stats $build.samtools.recode.vcf > $build.filteredbowtiesamtoolsvcf.txt
+echo $build | rm $build.samtools.vcf
+exit 0
+
 else 
 echo "Outputs missing and/or truncated, please verify inputs"
 exit 1
+fi
 
 ;;
-    "Bwa-mem")
 
+	"ReadPair")
 echo "Select your reference (.fna) and read (.fastq) files; include path."
 echo "Note: You may choose from the following files in this directory and/or 
 subdirectories "
@@ -67,9 +93,82 @@ read -p "Read_1 : " read_1
 read -p "Read_2 : " read_2
 clear
 echo "Select a name for your build, sortedbam, and vcf."
-read -p "BuildName :" build
+read -p "BuildName : " build
+read -r -p "Do you wish to run GATK as well? [y/N] : " response
 cmd="sort"
-if [ -r $ref ] && [ -r $read_1 ] && [ -r $read_2 ] ; then
+if [[ $response =~ ^([yY][eE][sS]|[yY])$ ]] && [ -r $ref ] && [ -r $read_1 ] && [ -r $read_2 ] ; then
+
+#Bowtie2 Alignment
+echo $ref $build | bowtie2-build $ref $build
+echo $build $read_1 $read_2 | bowtie2 -x $build -1 $read_1 -2 $read_2 --threads 16 -S $build.sam > $build.aln.txt
+echo $build | samtools view -bS $build.sam -@ 16 > $build.bam
+
+#GATK VCF:
+echo $ref | java -Djava.io.tmpdir=../../tmp -XX:ParallelGCThreads=16 -jar $dirpath/picard-tools-2.0.1/picard.jar CreateSequenceDictionary R= $ref O= $ref.dict
+echo $build | java -Djava.io.tmpdir=../../tmp -XX:ParallelGCThreads=16 -jar $dirpath/picard-tools-2.0.1/picard.jar AddOrReplaceReadGroups  INPUT= $build.sam OUTPUT= $build.fixed.sam RGID=1  RGLB= library1  RGPL=illumina RGPU=1  RGSM=sample1 SORT_ORDER=coordinate CREATE_INDEX=TRUE VALIDATION_STRINGENCY=LENIENT
+echo $build | rm $build.sam
+echo $build | java -Djava.io.tmpdir=../../tmp -XX:ParallelGCThreads=16 -jar $dirpath/picard-tools-2.0.1/picard.jar SortSam I= $build.fixed.sam  O= $build.fixed.sorted.bam SORT_ORDER=coordinate CREATE_INDEX=TRUE VALIDATION_STRINGENCY=LENIENT
+echo $build | rm $build.fixed.sam
+echo $ref $build | java -Djava.io.tmpdir=../../tmp -jar $dirpath/GenomeAnalysisTK.jar -nct 16 -T HaplotypeCaller -R $ref -I $build.fixed.sorted.bam -stand_call_conf 30 -stand_emit_conf 10 -o $build.gatk.vcf
+echo $build | rm $build.fixed.sorted.bam
+#Filter
+echo $build | vcftools --vcf $build.gatk.vcf --recode --recode-INFO-all --out $build.gatk --minQ 20.00
+echo $build | bcftools stats $build.gatk.recode.vcf > $build.filteredbowtiegatkvcf.txt
+echo $build | rm $build.gatk.vcf
+
+#Samtools VCF:
+echo $cmd $build | samtools $cmd $build.bam $build.sorted -@ 16
+echo $build | rm $build.bam
+echo $ref $build | samtools mpileup -uf $ref $build.sorted.bam | bcftools call -c > $build.samtools.vcf
+echo $build | rm $build.sorted.bam
+#Filter
+echo $build | vcftools --vcf $build.samtools.vcf --recode --recode-INFO-all --out $build.samtools --minQ 20.00
+echo $build | bcftools stats $build.samtools.recode.vcf > $build.filteredbowtiesamtoolsvcf.txt
+echo $build | rm $build.samtools.vcf
+exit 0
+
+elif [[ $response =~ ^([nN][oO]|[nN])$ ]] && [ -r $ref ] && [ -r $read ] ; then
+echo $ref $build | bowtie2-build $ref $build
+echo $build $read_1 $read_2 | bowtie2 -x $build -1 $read_1 -2 $read_2 --threads 16 -S $build.sam > $build.aln.txt
+echo $build | samtools view -bS $build.sam -@ 16 > $build.bam
+echo $build | rm $build.sam
+echo $cmd $build | samtools $cmd $build.bam $build.sorted -@ 16
+echo $build | rm $build.bam
+echo $ref $build | samtools mpileup -uf $ref $build.sorted.bam | bcftools call -c > $build.samtools.vcf
+echo $build | rm $build.sorted.bam 
+echo $build | vcftools --vcf $build.samtools.vcf --recode --recode-INFO-all --out $build.samtools --minQ 20.00
+echo $build | bcftools stats $build.samtools.recode.vcf > $build.filteredbowtiesamtoolsvcf.txt
+echo $build | rm $build.samtools.vcf
+exit 0
+
+else 
+echo "Outputs missing and/or truncated, please verify inputs"
+exit 1
+fi
+;;
+
+*) echo invalid option;;
+
+esac
+done
+
+;;
+	"Bwa-mem")
+
+echo "Select your reference (.fna) and read (.fastq) files; include path."
+echo "Note: You may choose from the following files in this directory and/or 
+subdirectories "
+ls -L | find . -name "*.fa" -o -name "*.faa" -o -name "*.fna" -o -name "*.ffn" -o -name "*.frn"
+read -p "Reference : " ref
+ls -L | find . -name "*.fastq"
+echo "For a single read alignment, leave 'Read_2' empty and hit enter"
+read -p "Read_1 : " read_1
+read -p "Read_2 : " read_2
+clear
+echo "Select a name for your build, sortedbam, and vcf."
+read -p "BuildName : " build
+cmd="sort"
+if [ -r $ref ] ; then
 
 #Bwa mem alignment
 echo $ref | bwa index -a $ref
@@ -77,37 +176,40 @@ echo $ref $read_1 $read_2 $build | bwa mem -M $ref $read_1 $read_2 > $build.sam
 echo $build | samtools view -bS $build.sam > $build.bam
 
 #GATK VCF:
-echo $ref | java -jar ../../../../opt/picard-tools-2.0.1/picard.jar CreateSequenceDictionary R= $ref O= $ref.dict
-echo $build | java -jar ../../../../opt/picard-tools-2.0.1/picard.jar AddOrReplaceReadGroups  INPUT= $build.sam OUTPUT= $build.fixed.sam RGID=1  RGLB= library1  RGPL=illumina RGPU=1  RGSM=sample1 SORT_ORDER=coordinate CREATE_INDEX=TRUE VALIDATION_STRINGENCY=LENIENT
+echo $ref | java -Djava.io.tmpdir=../../tmp -XX:ParallelGCThreads=16 -jar $dirpath/picard-tools-2.0.1/picard.jar CreateSequenceDictionary R= $ref O= $ref.dict
+echo $build | java -Djava.io.tmpdir=../../tmp -XX:ParallelGCThreads=16 -jar $dirpath/picard-tools-2.0.1/picard.jar AddOrReplaceReadGroups  INPUT= $build.sam OUTPUT= $build.fixed.sam RGID=1  RGLB= library1  RGPL=illumina RGPU=1  RGSM=sample1 SORT_ORDER=coordinate CREATE_INDEX=TRUE VALIDATION_STRINGENCY=LENIENT
 echo $build | rm $build.sam
-echo $build | java -jar ../../../../opt/picard-tools-2.0.1/picard.jar SortSam I= $build.fixed.sam  O= $build.fixed.sorted.bam SORT_ORDER=coordinate CREATE_INDEX=TRUE VALIDATION_STRINGENCY=LENIENT
+echo $build | java -Djava.io.tmpdir=../../tmp -XX:ParallelGCThreads=16 -jar $dirpath/picard-tools-2.0.1/picard.jar SortSam I= $build.fixed.sam  O= $build.fixed.sorted.bam SORT_ORDER=coordinate CREATE_INDEX=TRUE VALIDATION_STRINGENCY=LENIENT
 echo $build | rm $build.fixed.sam
-echo $ref $build | java -jar ../../../../opt/GenomeAnalysisTK.jar -T HaplotypeCaller -R $ref -I $build.fixed.sorted.bam -stand_call_conf 30 -stand_emit_conf 10 -o $build.gatk.vcf
+echo $ref $build | java -Djava.io.tmpdir=../../tmp -jar $dirpath/GenomeAnalysisTK.jar -nct 16 -T HaplotypeCaller -R $ref -I $build.fixed.sorted.bam -stand_call_conf 30 -stand_emit_conf 10 -o $build.gatk.vcf
 echo $build | rm $build.fixed.sorted.bam
-echo $build | bcftools stats $build.gatk.vcf > $build.gatkvcf.txt
+
+#Filtering based on Quality
+echo $build | vcftools --vcf $build.gatk.vcf --recode --recode-INFO-all --out $build.bwagatk --minQ 20.00
+echo $build | bcftools stats $build.bwagatk.recode.vcf > $build.filteredbwagatkvcf.txt
+echo $build | rm $build.gatk.vcf
 
 #Samtools VCF:
 echo $cmd $build | samtools $cmd $build.bam $build.sorted -@ 16
 echo $build | rm $build.bam
-echo $build | samtools index $build.sorted
-echo $build | java -XX:ParallelGCThreads=16 -jar picard.jar MarkDuplicates INPUT=$build.sorted OUTPUT=$build.bam METRICS_FILE=metrics.txt REMOVE_DUPLICATES=true VALIDATION_STRINGENCY=LENIENT
-echo $build $ref | java -XX:ParallelGCThreads=16 -jar GenomeAnalysisTK.jar -T RealignerTargetCreator -R $ref -I $build.bam -o Intervals.txt
-echo $ref $build | java -XX:ParallelGCThreads=16 -jar GenomeAnalysisTK.jar -T IndelRealigner -R $ref -I $build.bam -targetIntervals Intervals.txt -o $NoDupRealigned.bam
-echo $ref $NoDupRealigned.bam | samtools mpileup -uf $ref $NoDupRealigned.bam | bcftools call -c > $build.samtools.vcf
-echo $build.samtools.vcf | vcftools --vcf $build.samtools.vcf --recode --recode-INFO-all --out $build --minQ 20.00 #The output adds '.recode.vcf' to the specified name
-echo $build | rm $NoDupRealigned.bam
-echo $build | bcftools stats $build.recode.vcf > $build.samtools.txt
+echo $ref $build | samtools mpileup -uf $ref $build.sorted.bam | bcftools call -c > $build.bwasamtools.vcf
+echo $build | rm $build.sorted.bam
+
+#Filter
+echo $build | vcftools --vcf $build.bwasamtools.vcf --recode --recode-INFO-all --out $build.bwasamtools --minQ 20.00
+echo $build | bcftools stats $build.bwasamtools.recode.vcf > $build.filteredbwasamtoolsvcf.txt
+echo $build | rm $build.bwasamtools.vcf
+
 exit 0
 else 
 echo "Outputs missing and/or truncated, please verify inputs"
 exit 1
-
+fi
 
 ;;
 
-    *)
-echo "Please choose a valid input"
-;;
+	*) echo invalid option;;
 
 esac
 done
+	    ;;
